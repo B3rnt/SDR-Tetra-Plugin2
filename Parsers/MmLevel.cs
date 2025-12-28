@@ -91,6 +91,13 @@ namespace SDRSharp.Tetra
         {
             int mmStart = offset;
 
+            // Defensive: ReceivedData is reused; clear per-PDU fields so values don't leak.
+            result.SetValue(GlobalNames.GSSI, -1);
+            result.SetValue(GlobalNames.MM_vGSSI, -1);
+            result.SetValue(GlobalNames.CCK_id, -1);
+            result.SetValue(GlobalNames.GSSI_verified, 0);
+            result.SetValue(GlobalNames.ITSI_attach, 0);
+
             if (offset + 4 > channelData.Length)
             {
                 result.SetValue(GlobalNames.OutOfBuffer, 1);
@@ -106,6 +113,11 @@ namespace SDRSharp.Tetra
                 case MmPduType.D_LOCATION_UPDATE_ACCEPT:
                     offset = Global.ParseParams(channelData, offset, _locationUpdateAcceptRules, result);
                     offset = ParseLocationUpdateAcceptExtensions(channelData, offset, result);
+                    // Last resort: if we still didn't find CCK_id, scan a bit wider over this MM payload.
+                    if (result.Value(GlobalNames.CCK_id) <= 0)
+                        ScanForCck64(channelData, mmStart, result);
+                    if (result.Value(GlobalNames.CCK_id) == 64 && result.Value(GlobalNames.GSSI_verified) == 0)
+                        result.SetValue(GlobalNames.ITSI_attach, 1);
                     break;
 
                 case MmPduType.D_LOCATION_UPDATE_COMMAND:
@@ -214,12 +226,8 @@ namespace SDRSharp.Tetra
                 {
                     // Best-effort: nog wel CCK zoeken (ITSI attach gebruikt dit vaak)
                     bool cckFound = ScanForCck64(channelData, offset, result);
-                    if (cckFound)
-                    {
-                        // Mark this LU accept as ITSI attach (even if sometimes a GSSI is present)
-                        // We encode it via Location_update_type sentinel to keep changes minimal.
-                        result.SetValue(GlobalNames.Location_update_type, 255);
-                    }
+                    if (cckFound && result.Value(GlobalNames.CCK_id) == 64)
+                        result.SetValue(GlobalNames.ITSI_attach, 1);
                     return offset;
                 }
 
@@ -241,17 +249,21 @@ namespace SDRSharp.Tetra
 
                     if (t == 0)
                     {
+                        // Group identity list entry - advance but don't treat as "the" GSSI.
                         if (offset + 24 > channelData.Length) break;
-                        int gssi = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
+                        int gssiTmp = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
                         offset += 24;
-                        result.SetValue(GlobalNames.GSSI, gssi);
+                        // Keep as optional (unverified) vGSSI slot so it won't be printed unless verified.
+                        if (result.Value(GlobalNames.MM_vGSSI) <= 0)
+                            result.SetValue(GlobalNames.MM_vGSSI, gssiTmp);
                     }
                     else if (t == 1)
                     {
                         if (offset + 48 > channelData.Length) break;
-                        int gssi = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
+                        int gssiTmp = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
                         offset += 24;
-                        result.SetValue(GlobalNames.GSSI, gssi);
+                        if (result.Value(GlobalNames.MM_vGSSI) <= 0)
+                            result.SetValue(GlobalNames.MM_vGSSI, gssiTmp);
                         offset += 24; // skip extra 24
                     }
                     else if (t == 2)
@@ -274,9 +286,14 @@ namespace SDRSharp.Tetra
                     int gssi2 = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
                     offset += 24;
                     result.SetValue(GlobalNames.GSSI, gssi2);
+                    result.SetValue(GlobalNames.GSSI_verified, 1);
                 }
 
                 ScanForCck64(channelData, offset, result);
+
+                // ITSI attach heuristic (SDRtetra): CCK_identifier 64 and no verified GSSI.
+                if (result.Value(GlobalNames.CCK_id) == 64 && result.Value(GlobalNames.GSSI_verified) == 0)
+                    result.SetValue(GlobalNames.ITSI_attach, 1);
                 return offset;
             }
             catch
@@ -314,6 +331,7 @@ namespace SDRSharp.Tetra
 
         private static int _lastAuthStatus = -1;
         private static int _lastAuthSsi = -1;
+        private static DateTime _lastAuthTime = DateTime.MinValue;
 
         public static void LogMmPdu(LogicChannel channelData, int bitOffset, int bitLength, ReceivedData parsed)
         {
@@ -345,14 +363,14 @@ namespace SDRSharp.Tetra
                 if (ssi <= 0) ssi = parsed.Value(GlobalNames.MM_SSI);
 
                 int gssi = parsed.Value(GlobalNames.GSSI);
-                if (gssi <= 0) gssi = parsed.Value(GlobalNames.MM_vGSSI);
+                int gssiVerified = parsed.Value(GlobalNames.GSSI_verified);
+                if (gssiVerified != 1) gssi = -1; // only print the verified GSSI like SDRtetra
 
                 int cckId = parsed.Value(GlobalNames.CCK_id);
 
                 // ITSI attach: SDRtetra prints "- ITSI attach". It may or may not include a GSSI.
-                // We mark ITSI attach in the parser using a Location_update_type sentinel (255).
+                bool isItsiAttach = (mmType == MmPduType.D_LOCATION_UPDATE_ACCEPT && parsed.Value(GlobalNames.ITSI_attach) == 1);
                 int lut = parsed.Value(GlobalNames.Location_update_type);
-                bool isItsiAttach = (mmType == MmPduType.D_LOCATION_UPDATE_ACCEPT && lut == 255);
 
                 switch (mmType)
                 {
@@ -365,6 +383,7 @@ namespace SDRSharp.Tetra
                         {
                             _lastAuthStatus = status;
                             _lastAuthSsi = ssi;
+                            _lastAuthTime = DateTime.Now;
                         }
 
                         if (sub == (int)D_AuthenticationPduSubType.Demand)
@@ -394,12 +413,13 @@ namespace SDRSharp.Tetra
                         int acc = parsed.Value(GlobalNames.Location_update_accept_type);
 
                         sb.Append("MS request for registration");
-                        if (acc == 0) sb.Append("/authentication ACCEPTED");
+                        bool recentAuth = (_lastAuthSsi > 0 && _lastAuthSsi == ssi && (DateTime.Now - _lastAuthTime).TotalSeconds <= 3.0);
+                        if (acc == 0 || recentAuth) sb.Append("/authentication ACCEPTED");
                         else sb.Append(" ACCEPTED");
 
                         if (ssi > 0) { sb.Append(" for SSI: "); sb.Append(ssi); }
 
-                        // Show GSSI if available. ITSI attach may or may not include a GSSI.
+                        // Show GSSI only when verified (SDRtetra behavior). For ITSI attach, most often none.
                         if (gssi > 0)
                         {
                             sb.Append(" GSSI: ");
