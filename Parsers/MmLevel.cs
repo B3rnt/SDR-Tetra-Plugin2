@@ -209,10 +209,17 @@ namespace SDRSharp.Tetra
                 offset += 2;
 
                 // SDRtetra: als GI extension niet actief is -> NIET verder proberen te “vinden”
+                // (anders pak je random bits als GSSI). Dit scenario is vaak ITSI attach.
                 if (groupIdentityLocAccept == 0)
                 {
                     // Best-effort: nog wel CCK zoeken (ITSI attach gebruikt dit vaak)
-                    ScanForCck64(channelData, offset, result);
+                    bool cckFound = ScanForCck64(channelData, offset, result);
+                    if (cckFound)
+                    {
+                        // Mark this LU accept as ITSI attach (even if sometimes a GSSI is present)
+                        // We encode it via Location_update_type sentinel to keep changes minimal.
+                        result.SetValue(GlobalNames.Location_update_type, 255);
+                    }
                     return offset;
                 }
 
@@ -278,11 +285,12 @@ namespace SDRSharp.Tetra
             }
         }
 
-        private static void ScanForCck64(LogicChannel channelData, int offset, ReceivedData result)
+        private static bool ScanForCck64(LogicChannel channelData, int offset, ReceivedData result)
         {
             try
             {
-                int scanEnd = Math.Min(channelData.Length - 8, offset + 96);
+                // Wider scan window: CCK_id appears later in some LU accepts.
+                int scanEnd = Math.Min(channelData.Length - 8, offset + 192);
                 for (int i = offset; i <= scanEnd; i++)
                 {
                     if ((i % 8) != 0) continue;
@@ -290,11 +298,13 @@ namespace SDRSharp.Tetra
                     if (b == 64)
                     {
                         result.SetValue(GlobalNames.CCK_id, b);
-                        return;
+                        return true;
                     }
                 }
             }
             catch { }
+
+            return false;
         }
     }
 
@@ -316,6 +326,8 @@ namespace SDRSharp.Tetra
                 sb.Append("  ");
 
                 int la = parsed.Value(GlobalNames.Location_Area);
+                if (la <= 0)
+                    la = TetraRuntime.CurrentLocationArea;
                 if (la > 0)
                 {
                     sb.Append("[LA: ");
@@ -337,9 +349,10 @@ namespace SDRSharp.Tetra
 
                 int cckId = parsed.Value(GlobalNames.CCK_id);
 
-                // ITSI attach heuristic like your SDRtetra example:
-                // " ... ACCEPTED ... - CCK_identifier: 64 - ITSI attach" and NO GSSI.
-                bool isItsiAttach = (mmType == MmPduType.D_LOCATION_UPDATE_ACCEPT && cckId == 64 && gssi <= 0);
+                // ITSI attach: SDRtetra prints "- ITSI attach". It may or may not include a GSSI.
+                // We mark ITSI attach in the parser using a Location_update_type sentinel (255).
+                int lut = parsed.Value(GlobalNames.Location_update_type);
+                bool isItsiAttach = (mmType == MmPduType.D_LOCATION_UPDATE_ACCEPT && lut == 255);
 
                 switch (mmType)
                 {
@@ -386,8 +399,8 @@ namespace SDRSharp.Tetra
 
                         if (ssi > 0) { sb.Append(" for SSI: "); sb.Append(ssi); }
 
-                        // Alleen GSSI tonen als het GEEN ITSI attach is en we echt een GSSI hebben
-                        if (!isItsiAttach && gssi > 0)
+                        // Show GSSI if available. ITSI attach may or may not include a GSSI.
+                        if (gssi > 0)
                         {
                             sb.Append(" GSSI: ");
                             sb.Append(gssi);
@@ -406,15 +419,19 @@ namespace SDRSharp.Tetra
                             sb.Append(cckId);
                         }
 
-                        // If you still have Location_update_type from elsewhere, keep it;
-                        // otherwise for ITSI attach show ITSI attach like SDRtetra.
+                        // SDRtetra style tails
                         if (isItsiAttach)
                         {
                             sb.Append(" - ITSI attach");
                         }
+                        else if (cckId == 64)
+                        {
+                            // Your network prints this on LU accepts with CCK_identifier 64
+                            sb.Append(" - Roaming location updating");
+                        }
                         else
                         {
-                            int lut = parsed.Value(GlobalNames.Location_update_type);
+                            // Fallback if we do have a decoded LU type
                             if (lut >= 0)
                             {
                                 string lutText = LocationUpdateTypeToString(lut);

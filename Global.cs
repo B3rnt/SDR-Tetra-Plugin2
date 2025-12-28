@@ -5,6 +5,15 @@ using System.Runtime.CompilerServices;
 
 namespace SDRSharp.Tetra
 {
+    /// <summary>
+    /// Runtime cache for values broadcast in SYSINFO (MAC) but used when logging
+    /// other layers (e.g. MM). SDRtetra prints a cached LA for MM lines.
+    /// </summary>
+    public static class TetraRuntime
+    {
+        public static int CurrentLocationArea = -1;
+    }
+
     public enum GlobalNames
     {
         Data_Separator = 0,
