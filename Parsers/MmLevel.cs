@@ -154,28 +154,48 @@ namespace SDRSharp.Tetra
                     break;
 
                 case MmPduType.D_OTAR:
-                    if (offset + 4 <= channelData.Length)
-                    {
-                        result.SetValue(GlobalNames.Otar_sub_type, TetraUtils.BitsToInt32(channelData.Ptr, offset, 4));
-                        offset += 4;
-                    }
-                    else
-                    {
-                        result.SetValue(GlobalNames.OutOfBuffer, 1);
-                    }
-                    break;
+    if (offset + 4 <= channelData.Length)
+    {
+        int sub = TetraUtils.BitsToInt32(channelData.Ptr, offset, 4);
+        result.SetValue(GlobalNames.Otar_sub_type, sub);
+        offset += 4;
+
+        // Best-effort: many OTAR sub-PDUs carry a CCK_id early in the payload.
+        // We decode 8 bits if available (safe even if not used; you still have raw=... for verification).
+        if (offset + 8 <= channelData.Length)
+        {
+            result.SetValue(GlobalNames.CCK_id, TetraUtils.BitsToInt32(channelData.Ptr, offset, 8));
+            offset += 8;
+        }
+    }
+    else
+    {
+        result.SetValue(GlobalNames.OutOfBuffer, 1);
+    }
+    break;
+
 
                 case MmPduType.D_AUTHENTICATION:
-                    if (offset + 2 <= channelData.Length)
-                    {
-                        result.SetValue(GlobalNames.Authentication_sub_type, TetraUtils.BitsToInt32(channelData.Ptr, offset, 2));
-                        offset += 2;
-                    }
-                    else
-                    {
-                        result.SetValue(GlobalNames.OutOfBuffer, 1);
-                    }
-                    break;
+    if (offset + 2 <= channelData.Length)
+    {
+        int sub = TetraUtils.BitsToInt32(channelData.Ptr, offset, 2);
+        result.SetValue(GlobalNames.Authentication_sub_type, sub);
+        offset += 2;
+
+        // Best-effort: some implementations include a 6-bit status in RESULT / REJECT.
+        if ((sub == (int)D_AuthenticationPduSubType.Result || sub == (int)D_AuthenticationPduSubType.Reject) &&
+            offset + 6 <= channelData.Length)
+        {
+            result.SetValue(GlobalNames.Authentication_status, TetraUtils.BitsToInt32(channelData.Ptr, offset, 6));
+            offset += 6;
+        }
+    }
+    else
+    {
+        result.SetValue(GlobalNames.OutOfBuffer, 1);
+    }
+    break;
+
 
                 case MmPduType.D_CK_CHANGE_DEMAND:
                     if (offset + 1 <= channelData.Length)
@@ -202,21 +222,123 @@ namespace SDRSharp.Tetra
         private const string DefaultPath = "mm_messages.log";
 
         public static void LogMmPdu(LogicChannel channelData, int bitOffset, int bitLength, ReceivedData parsed)
+{
+    try
+    {
+        // Timestamp like the original SDRtetra log (but with date included)
+        var sb = new StringBuilder(512);
+        sb.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+        sb.Append("  ");
+
+        // LA (Location Area) if available
+        int la = parsed.Value(GlobalNames.Location_Area);
+        if (la > 0)
         {
-            try
+            sb.Append("[LA: ");
+            sb.Append(la.ToString().PadLeft(4));
+            sb.Append("]   ");
+        }
+        else
+        {
+            sb.Append("            ");
+        }
+
+        var mmType = (MmPduType)parsed.Value(GlobalNames.MM_PDU_Type);
+
+        // Best-effort identities from earlier layers (MAC) or MM itself
+        int ssi = parsed.Value(GlobalNames.SSI);
+        if (ssi <= 0) ssi = parsed.Value(GlobalNames.MM_SSI);
+
+        int gssi = parsed.Value(GlobalNames.GSSI);
+        if (gssi <= 0) gssi = parsed.Value(GlobalNames.MM_vGSSI);
+
+        int cckId = parsed.Value(GlobalNames.CCK_id);
+
+        // Human-friendly line (similar style to SDRtetra)
+        switch (mmType)
+        {
+            case MmPduType.D_AUTHENTICATION:
+    if (offset + 2 <= channelData.Length)
+    {
+        int sub = TetraUtils.BitsToInt32(channelData.Ptr, offset, 2);
+        result.SetValue(GlobalNames.Authentication_sub_type, sub);
+        offset += 2;
+
+        // Best-effort: some implementations include a 6-bit status in RESULT / REJECT.
+        if ((sub == (int)D_AuthenticationPduSubType.Result || sub == (int)D_AuthenticationPduSubType.Reject) &&
+            offset + 6 <= channelData.Length)
+        {
+            result.SetValue(GlobalNames.Authentication_status, TetraUtils.BitsToInt32(channelData.Ptr, offset, 6));
+            offset += 6;
+        }
+    }
+    else
+    {
+        result.SetValue(GlobalNames.OutOfBuffer, 1);
+    }
+    break;
+
+            }
+
+            case MmPduType.D_OTAR:
+    if (offset + 4 <= channelData.Length)
+    {
+        int sub = TetraUtils.BitsToInt32(channelData.Ptr, offset, 4);
+        result.SetValue(GlobalNames.Otar_sub_type, sub);
+        offset += 4;
+
+        // Best-effort: many OTAR sub-PDUs carry a CCK_id early in the payload.
+        // We decode 8 bits if available (safe even if not used; you still have raw=... for verification).
+        if (offset + 8 <= channelData.Length)
+        {
+            result.SetValue(GlobalNames.CCK_id, TetraUtils.BitsToInt32(channelData.Ptr, offset, 8));
+            offset += 8;
+        }
+    }
+    else
+    {
+        result.SetValue(GlobalNames.OutOfBuffer, 1);
+    }
+    break;
+
+            }
+
+            case MmPduType.D_LOCATION_UPDATE_ACCEPT:
             {
-                var sb = new StringBuilder(256);
-                sb.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
-                sb.Append(" MM ");
+                int acc = parsed.Value(GlobalNames.Location_update_accept_type);
+                sb.Append("MS request for registration");
+                if (acc == 0) sb.Append("/authentication ACCEPTED");
+                else sb.Append(" ACCEPTED");
 
-                int pduType = parsed.Value(GlobalNames.MM_PDU_Type);
-                sb.Append(((MmPduType)pduType).ToString());
+                if (ssi > 0) { sb.Append(" for SSI: "); sb.Append(ssi); }
+                if (gssi > 0) { sb.Append(" GSSI: "); sb.Append(gssi); }
 
-                // Add a few useful decoded fields when present
+                if (cckId > 0) { sb.Append(" - CCK_id: "); sb.Append(cckId); }
+
+                int lut = parsed.Value(GlobalNames.Location_update_type);
+                if (lut >= 0)
+                {
+                    var lutText = LocationUpdateTypeToString(lut);
+                    if (!string.IsNullOrEmpty(lutText))
+                    {
+                        sb.Append(" - ");
+                        sb.Append(lutText);
+                    }
+                }
+                break;
+            }
+
+            default:
+            {
+                // Fallback: keep previous "MM <type> ..." style with extra fields
+                sb.Append("MM ");
+                sb.Append(mmType.ToString());
+
                 AppendIfPresent(sb, parsed, GlobalNames.Otar_sub_type, "otar_sub");
                 AppendIfPresent(sb, parsed, GlobalNames.Authentication_sub_type, "auth_sub");
-                AppendIfPresent(sb, parsed, GlobalNames.Status_downlink, "status");
-                AppendIfPresent(sb, parsed, GlobalNames.MM_SSI, "ssi");
+                AppendIfPresent(sb, parsed, GlobalNames.SSI, "ssi");
+                AppendIfPresent(sb, parsed, GlobalNames.GSSI, "gssi");
+                AppendIfPresent(sb, parsed, GlobalNames.MM_SSI, "mm_ssi");
                 AppendIfPresent(sb, parsed, GlobalNames.MM_vGSSI, "vgssi");
                 AppendIfPresent(sb, parsed, GlobalNames.Location_update_type, "lu_type");
                 AppendIfPresent(sb, parsed, GlobalNames.Location_update_accept_type, "lu_acc");
@@ -225,20 +347,43 @@ namespace SDRSharp.Tetra
                 AppendIfPresent(sb, parsed, GlobalNames.Cipher_control, "cc");
                 AppendIfPresent(sb, parsed, GlobalNames.Group_identity_attach_detach_mode, "gi_mode");
                 AppendIfPresent(sb, parsed, GlobalNames.Group_identity_accept_reject, "gi_acc");
-
-                // Raw payload in hex (bit-packed, MSB first)
-                sb.Append(" raw=");
-                sb.Append(BitsToHex(channelData.Ptr, bitOffset, bitLength));
-
-                new TextFile().Write(sb.ToString(), DefaultPath);
-            }
-            catch
-            {
-                // Intentionally ignore logging failures so decoding continues.
+                break;
             }
         }
 
-        private static void AppendIfPresent(StringBuilder sb, ReceivedData data, GlobalNames name, string label)
+        // Always include raw MM payload so you never miss vendor-specific/unknown fields.
+        sb.Append("  raw=");
+        sb.Append(BitsToHex(channelData.Ptr, bitOffset, bitLength));
+
+        new TextFile().Write(sb.ToString(), DefaultPath);
+    }
+    catch
+    {
+        // ignore logging failures
+    }
+}
+
+private static string AuthenticationStatusToString(int status)
+{
+    // Best-effort: many networks use "0" for success/no auth in progress
+    if (status == 0) return "Authentication successful or no authentication currently in progress";
+    if (status < 0) return "Authentication status unknown";
+    return "Authentication status " + status.ToString();
+}
+
+private static string LocationUpdateTypeToString(int t)
+{
+    // Best-effort naming (values vary by implementation; keep conservative)
+    switch (t)
+    {
+        case 0: return "Normal location updating";
+        case 1: return "Roaming location updating";
+        case 2: return "Periodic location updating";
+        default: return "Location update type " + t.ToString();
+    }
+}
+
+private static void AppendIfPresent(StringBuilder sb, ReceivedData data, GlobalNames name, string label)
         {
             int v = data.Value(name);
             if (v >= 0)

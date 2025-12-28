@@ -304,7 +304,8 @@ namespace SDRSharp.Tetra
         Group_identity_report,
         Group_identity_acknowledgement_request,
         Group_identity_accept_reject,
-        Group_identity_attach_detach_mode,
+        Group_identity_attach_detach_mode,        CCK_id,
+        Authentication_status,
         End // Always must be here
 
     }
