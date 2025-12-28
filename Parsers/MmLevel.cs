@@ -274,6 +274,8 @@ namespace SDRSharp.Tetra
                             sb.Append("BS result to MS authentication: ");
                             sb.Append(AuthenticationStatusToString(status));
                             if (ssi > 0) { sb.Append(" SSI: "); sb.Append(ssi); }
+
+                            // SDRtetra prints the text twice around a dash; keep similar style
                             if (status >= 0)
                             {
                                 sb.Append(" - ");
@@ -426,17 +428,5 @@ namespace SDRSharp.Tetra
                 sb.Append(bytes[i].ToString("X2"));
             return sb.ToString();
         }
-    }
-
-    // --------------------------------------------------------------------
-    // Fallback enums (REMOVE if you already have them elsewhere in project)
-    // --------------------------------------------------------------------
-
-    internal enum D_AuthenticationPduSubType
-    {
-        Demand = 0,   // observed in your log as auth_sub=0
-        Reply  = 1,
-        Result = 2,   // observed in your log as auth_sub=2 (success/no auth)
-        Reject = 3
     }
 }
