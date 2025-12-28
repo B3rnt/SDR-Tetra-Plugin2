@@ -267,14 +267,8 @@ namespace SDRSharp.Tetra
                     }
                 }
 
-                // Alleen als SDRtetra-style GI lijst netjes eindigde, dan pas de “5 + 24bits GSSI”
-                if (sawTerminator && sawAnyEntry && offset + 5 + 24 <= channelData.Length)
-                {
-                    offset += 5; // unknown flags
-                    int gssi2 = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
-                    offset += 24;
-                    result.SetValue(GlobalNames.GSSI, gssi2);
-                }
+                // LET OP: De extra “5 + 24bits GSSI” read is expres verwijderd.
+                // Die was misaligned en overschreef soms de juiste GSSI uit de GI-lijst.
 
                 ScanForCck64(channelData, offset, result);
                 return offset;
