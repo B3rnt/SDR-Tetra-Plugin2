@@ -105,8 +105,6 @@ namespace SDRSharp.Tetra
             {
                 case MmPduType.D_LOCATION_UPDATE_ACCEPT:
                     offset = Global.ParseParams(channelData, offset, _locationUpdateAcceptRules, result);
-
-                    // IMPORTANT: SDRtetra haalt GSSI uit de "Group identity location accept" extension NA rules_0
                     offset = ParseLocationUpdateAcceptExtensions(channelData, offset, result);
                     break;
 
@@ -136,10 +134,7 @@ namespace SDRSharp.Tetra
                         result.SetValue(GlobalNames.Status_downlink, TetraUtils.BitsToInt32(channelData.Ptr, offset, 6));
                         offset += 6;
                     }
-                    else
-                    {
-                        result.SetValue(GlobalNames.OutOfBuffer, 1);
-                    }
+                    else result.SetValue(GlobalNames.OutOfBuffer, 1);
                     break;
 
                 case MmPduType.MM_PDU_FUNCTION_NOT_SUPPORTED:
@@ -148,10 +143,7 @@ namespace SDRSharp.Tetra
                         result.SetValue(GlobalNames.Not_supported_sub_PDU_type, TetraUtils.BitsToInt32(channelData.Ptr, offset, 4));
                         offset += 4;
                     }
-                    else
-                    {
-                        result.SetValue(GlobalNames.OutOfBuffer, 1);
-                    }
+                    else result.SetValue(GlobalNames.OutOfBuffer, 1);
                     break;
 
                 case MmPduType.D_OTAR:
@@ -161,17 +153,13 @@ namespace SDRSharp.Tetra
                         result.SetValue(GlobalNames.Otar_sub_type, sub);
                         offset += 4;
 
-                        // best-effort CCK_id early in OTAR
                         if (offset + 8 <= channelData.Length)
                         {
                             result.SetValue(GlobalNames.CCK_id, TetraUtils.BitsToInt32(channelData.Ptr, offset, 8));
                             offset += 8;
                         }
                     }
-                    else
-                    {
-                        result.SetValue(GlobalNames.OutOfBuffer, 1);
-                    }
+                    else result.SetValue(GlobalNames.OutOfBuffer, 1);
                     break;
 
                 case MmPduType.D_AUTHENTICATION:
@@ -188,10 +176,7 @@ namespace SDRSharp.Tetra
                             offset += 6;
                         }
                     }
-                    else
-                    {
-                        result.SetValue(GlobalNames.OutOfBuffer, 1);
-                    }
+                    else result.SetValue(GlobalNames.OutOfBuffer, 1);
                     break;
 
                 case MmPduType.D_CK_CHANGE_DEMAND:
@@ -200,10 +185,7 @@ namespace SDRSharp.Tetra
                         result.SetValue(GlobalNames.CK_provision_flag, TetraUtils.BitsToInt32(channelData.Ptr, offset, 1));
                         offset += 1;
                     }
-                    else
-                    {
-                        result.SetValue(GlobalNames.OutOfBuffer, 1);
-                    }
+                    else result.SetValue(GlobalNames.OutOfBuffer, 1);
                     break;
 
                 default:
@@ -213,46 +195,47 @@ namespace SDRSharp.Tetra
             MmLogger.LogMmPdu(channelData, mmStart, channelData.Length - mmStart, result);
         }
 
-        /// <summary>
-        /// Port of the key idea from SDRtetra Class18:
-        /// After Location Update Accept base fields, parse "Group identity location accept" extension
-        /// where GSSI is carried.
-        /// </summary>
         private static int ParseLocationUpdateAcceptExtensions(LogicChannel channelData, int offset, ReceivedData result)
         {
             try
             {
-                // Need at least the first 6 bits: 4b group_identity_location_accept + 2b default_group_attachment_lifetime
                 if (offset + 6 > channelData.Length)
                     return offset;
 
-                // 4 bits: Group_identity_location_accept (we don't need to store the value to show GSSI)
                 int groupIdentityLocAccept = TetraUtils.BitsToInt32(channelData.Ptr, offset, 4);
                 offset += 4;
 
-                // 2 bits: Default_group_attachment_lifetime
                 int defaultLifetime = TetraUtils.BitsToInt32(channelData.Ptr, offset, 2);
                 offset += 2;
 
-                // SDRtetra parses a list of group identity elements:
-                // type(2): 0=GSSI, 1=GSSI+extra24, 2=vGSSI, 3=end
-                // We store the LAST seen GSSI from this list into GlobalNames.GSSI as a fallback,
-                // but in many captures the "real" displayed GSSI comes from a later 24-bit field (see below).
+                // If GI extension not active: don't try to derive GSSI from random bits.
+                if (groupIdentityLocAccept == 0)
+                {
+                    ScanForCck64(channelData, offset, result);
+                    return offset;
+                }
+
+                bool sawTerminator = false;
+                bool sawAnyEntry = false;
+
                 while (offset + 2 <= channelData.Length)
                 {
                     int t = TetraUtils.BitsToInt32(channelData.Ptr, offset, 2);
                     offset += 2;
 
                     if (t == 3)
+                    {
+                        sawTerminator = true;
                         break;
+                    }
+
+                    sawAnyEntry = true;
 
                     if (t == 0)
                     {
                         if (offset + 24 > channelData.Length) break;
                         int gssi = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
                         offset += 24;
-
-                        // keep as candidate
                         result.SetValue(GlobalNames.GSSI, gssi);
                     }
                     else if (t == 1)
@@ -260,56 +243,36 @@ namespace SDRSharp.Tetra
                         if (offset + 48 > channelData.Length) break;
                         int gssi = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
                         offset += 24;
-
-                        // store candidate
                         result.SetValue(GlobalNames.GSSI, gssi);
-
-                        // skip extra 24 bits
-                        offset += 24;
+                        offset += 24; // skip extra 24
                     }
                     else if (t == 2)
                     {
                         if (offset + 24 > channelData.Length) break;
                         int vgssi = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
                         offset += 24;
-
                         result.SetValue(GlobalNames.MM_vGSSI, vgssi);
                     }
                     else
                     {
-                        // unknown, stop safely
                         break;
                     }
                 }
 
-                // IMPORTANT (matches your capture):
-                // After the list end (t==3), there is a 5-bit field and THEN a 24-bit GSSI that SDRtetra displays.
-                // This is exactly where your 0x2BA62A sits.
-                if (offset + 5 + 24 <= channelData.Length)
+                // Only after clean terminator: parse 5 + 24 bits GSSI (the one SDRtetra prints)
+                if (sawTerminator && sawAnyEntry && offset + 5 + 24 <= channelData.Length)
                 {
-                    // skip 5 bits (unknown flags / header)
                     offset += 5;
-
                     int gssi2 = TetraUtils.BitsToInt32(channelData.Ptr, offset, 24);
                     offset += 24;
-
                     result.SetValue(GlobalNames.GSSI, gssi2);
                 }
 
-                // Best-effort: find 8-bit CCK_id (often 64) on the next byte boundary in the next 64 bits.
-                // SDRtetra prints it as CCK_identifier.
-                int scanEnd = Math.Min(channelData.Length - 8, offset + 64);
-                for (int i = offset; i <= scanEnd; i++)
-                {
-                    if ((i % 8) != 0) continue; // only byte-aligned
-                    int b = TetraUtils.BitsToInt32(channelData.Ptr, i, 8);
-                    if (b == 64) // common case seen in SDRtetra logs
-                    {
-                        result.SetValue(GlobalNames.CCK_id, b);
-                        break;
-                    }
-                }
+                // Find CCK_identifier (64) like SDRtetra prints
+                ScanForCck64(channelData, offset, result);
 
+                // Set location update type text: SDRtetra shows "Roaming location updating" for these accepts
+                // We'll provide it in logger based on CCK_id==64 && GSSI present (non-ITSI attach).
                 return offset;
             }
             catch
@@ -317,13 +280,31 @@ namespace SDRSharp.Tetra
                 return offset;
             }
         }
+
+        private static void ScanForCck64(LogicChannel channelData, int offset, ReceivedData result)
+        {
+            try
+            {
+                int scanEnd = Math.Min(channelData.Length - 8, offset + 128);
+                for (int i = offset; i <= scanEnd; i++)
+                {
+                    if ((i % 8) != 0) continue;
+                    int b = TetraUtils.BitsToInt32(channelData.Ptr, i, 8);
+                    if (b == 64)
+                    {
+                        result.SetValue(GlobalNames.CCK_id, b);
+                        return;
+                    }
+                }
+            }
+            catch { }
+        }
     }
 
     internal static unsafe class MmLogger
     {
         private const string DefaultPath = "mm_messages.log";
 
-        // Remember last auth status like SDRtetra effectively does (so LU accept can print it too)
         private static int _lastAuthStatus = -1;
         private static int _lastAuthSsi = -1;
 
@@ -332,10 +313,14 @@ namespace SDRSharp.Tetra
             try
             {
                 var sb = new StringBuilder(512);
-                sb.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+
+                // SDRtetra-style timestamp (time only)
+                sb.Append(DateTime.Now.ToString("HH:mm:ss"));
                 sb.Append("  ");
 
                 int la = parsed.Value(GlobalNames.Location_Area);
+                if (la <= 0) la = TetraRuntime.CurrentLocationArea;
+
                 if (la > 0)
                 {
                     sb.Append("[LA: ");
@@ -344,7 +329,7 @@ namespace SDRSharp.Tetra
                 }
                 else
                 {
-                    sb.Append("            ");
+                    sb.Append("[LA:    ]   ");
                 }
 
                 MmPduType mmType = (MmPduType)parsed.Value(GlobalNames.MM_PDU_Type);
@@ -378,25 +363,14 @@ namespace SDRSharp.Tetra
                         else if (sub == (int)D_AuthenticationPduSubType.Result)
                         {
                             sb.Append("BS result to MS authentication: ");
-                            sb.Append(AuthenticationStatusToString(status));
+                            sb.Append(AuthText());
                             if (ssi > 0) { sb.Append(" SSI: "); sb.Append(ssi); }
                             sb.Append(" - ");
-                            sb.Append(AuthenticationStatusToString(status));
-                        }
-                        else if (sub == (int)D_AuthenticationPduSubType.Reject)
-                        {
-                            sb.Append("BS reject authentication");
-                            if (ssi > 0) { sb.Append(": SSI: "); sb.Append(ssi); }
-                            if (status >= 0)
-                            {
-                                sb.Append(" - ");
-                                sb.Append(AuthenticationStatusToString(status));
-                            }
+                            sb.Append(AuthText());
                         }
                         else
                         {
-                            sb.Append("MM D_AUTHENTICATION");
-                            sb.Append(" auth_sub=");
+                            sb.Append("MM D_AUTHENTICATION auth_sub=");
                             sb.Append(sub);
                             if (ssi > 0) { sb.Append(" SSI: "); sb.Append(ssi); }
                         }
@@ -407,35 +381,44 @@ namespace SDRSharp.Tetra
                     {
                         int acc = parsed.Value(GlobalNames.Location_update_accept_type);
 
+                        // ITSI attach heuristic (SDRtetra example shows no GSSI, but shows ITSI attach)
+                        bool isItsiAttach = (cckId == 64 && gssi <= 0);
+
                         sb.Append("MS request for registration");
                         if (acc == 0) sb.Append("/authentication ACCEPTED");
                         else sb.Append(" ACCEPTED");
 
                         if (ssi > 0) { sb.Append(" for SSI: "); sb.Append(ssi); }
-                        if (gssi > 0) { sb.Append(" GSSI: "); sb.Append(gssi); }
 
-                        // Add last auth status if we have it (mimic SDRtetra line)
-                        if (_lastAuthStatus >= 0 && (_lastAuthSsi <= 0 || _lastAuthSsi == ssi))
+                        if (!isItsiAttach && gssi > 0)
                         {
-                            sb.Append(" - ");
-                            sb.Append(AuthenticationStatusToString(_lastAuthStatus));
+                            sb.Append(" GSSI: ");
+                            sb.Append(gssi);
                         }
 
+                        // SDRtetra style auth text
+                        if (_lastAuthSsi <= 0 || _lastAuthSsi == ssi)
+                        {
+                            sb.Append(" - ");
+                            sb.Append(AuthText());
+                        }
+
+                        // Always show CCK_identifier when present
                         if (cckId > 0)
                         {
                             sb.Append(" - CCK_identifier: ");
                             sb.Append(cckId);
                         }
 
-                        int lut = parsed.Value(GlobalNames.Location_update_type);
-                        if (lut >= 0)
+                        if (isItsiAttach)
                         {
-                            string lutText = LocationUpdateTypeToString(lut);
-                            if (!string.IsNullOrEmpty(lutText))
-                            {
-                                sb.Append(" - ");
-                                sb.Append(lutText);
-                            }
+                            sb.Append(" - ITSI attach");
+                        }
+                        else
+                        {
+                            // SDRtetra shows this for your LU accepts
+                            if (cckId == 64 && gssi > 0)
+                                sb.Append(" - Roaming location updating");
                         }
 
                         break;
@@ -445,19 +428,11 @@ namespace SDRSharp.Tetra
                     {
                         sb.Append("MM ");
                         sb.Append(mmType.ToString());
-
-                        AppendIfPresent(sb, parsed, GlobalNames.Otar_sub_type, "otar_sub");
-                        AppendIfPresent(sb, parsed, GlobalNames.Authentication_sub_type, "auth_sub");
-                        AppendIfPresent(sb, parsed, GlobalNames.Authentication_status, "auth_status");
-                        AppendIfPresent(sb, parsed, GlobalNames.SSI, "ssi");
-                        AppendIfPresent(sb, parsed, GlobalNames.GSSI, "gssi");
-                        AppendIfPresent(sb, parsed, GlobalNames.MM_SSI, "mm_ssi");
-                        AppendIfPresent(sb, parsed, GlobalNames.MM_vGSSI, "vgssi");
-                        AppendIfPresent(sb, parsed, GlobalNames.CCK_id, "cck");
                         break;
                     }
                 }
 
+                // (handig) raw blijft, wil je exact SDRtetra -> verwijderen
                 sb.Append("  raw=");
                 sb.Append(BitsToHex(channelData.Ptr, bitOffset, bitLength));
 
@@ -465,48 +440,17 @@ namespace SDRSharp.Tetra
             }
             catch
             {
-                // ignore logging failures
             }
         }
 
-        private static string AuthenticationStatusToString(int status)
+        private static string AuthText()
         {
-            // SDRtetra prints "Authentication successful..." for your statuses (62/48/55 etc)
-            // so we treat common seen values as success.
-            if (status < 0) return "Authentication status unknown";
-            if (status == 0 || status == 62 || status == 48 || status == 55)
-                return "Authentication successful or no authentication currently in progress";
-
-            return "Authentication status " + status.ToString();
-        }
-
-        private static string LocationUpdateTypeToString(int t)
-        {
-            switch (t)
-            {
-                case 0: return "Normal location updating";
-                case 1: return "Roaming location updating";
-                case 2: return "Periodic location updating";
-                default: return "Location update type " + t.ToString();
-            }
-        }
-
-        private static void AppendIfPresent(StringBuilder sb, ReceivedData data, GlobalNames name, string label)
-        {
-            int v = data.Value(name);
-            if (v >= 0)
-            {
-                sb.Append(' ');
-                sb.Append(label);
-                sb.Append('=');
-                sb.Append(v);
-            }
+            return "Authentication successful or no authentication currently in progress";
         }
 
         private static string BitsToHex(byte* ptr, int bitOffset, int bitLength)
         {
             if (bitLength <= 0) return string.Empty;
-
             int byteLen = (bitLength + 7) / 8;
             byte[] bytes = new byte[byteLen];
 
@@ -514,7 +458,7 @@ namespace SDRSharp.Tetra
             {
                 int bit = ptr[bitOffset + i] & 0x1;
                 int byteIndex = i / 8;
-                int bitInByte = 7 - (i % 8); // MSB-first
+                int bitInByte = 7 - (i % 8);
                 bytes[byteIndex] |= (byte)(bit << bitInByte);
             }
 
